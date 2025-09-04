@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: animagenius-production
+  labels:
+    name: animagenius-production
+    environment: production
+    project: animagenius
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: animagenius-monitoring
+  labels:
+    name: animagenius-monitoring
+    environment: production
+    project: animagenius
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: animagenius-logging
+  labels:
+    name: animagenius-logging
+    environment: production
+    project: animagenius
