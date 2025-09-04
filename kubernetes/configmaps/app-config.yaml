@@ -1,0 +1,191 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: animagenius-config
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: config
+data:
+  # Application Configuration
+  NODE_ENV: "production"
+  LOG_LEVEL: "info"
+  
+  # Database Configuration
+  DB_HOST: "animagenius-production-rds-endpoint"
+  DB_PORT: "5432"
+  DB_NAME: "animagenius"
+  DB_SSL: "require"
+  DB_POOL_MIN: "5"
+  DB_POOL_MAX: "20"
+  
+  # Redis Configuration
+  REDIS_HOST: "animagenius-production-redis-endpoint"
+  REDIS_PORT: "6379"
+  REDIS_DB: "0"
+  REDIS_TLS: "true"
+  
+  # AWS Configuration
+  AWS_REGION: "us-east-1"
+  S3_BUCKET_VIDEOS: "animagenius-videos-production"
+  S3_BUCKET_ASSETS: "animagenius-assets-production"
+  CLOUDFRONT_DOMAIN: "cdn.animagenius.com"
+  
+  # API Configuration
+  API_VERSION: "v1"
+  API_RATE_LIMIT: "1000"
+  API_TIMEOUT: "30000"
+  
+  # Worker Configuration
+  WORKER_CONCURRENCY: "5"
+  WORKER_MAX_RETRIES: "3"
+  WORKER_RETRY_DELAY: "5000"
+  
+  # Video Processing Configuration
+  VIDEO_MAX_DURATION: "300"
+  VIDEO_MAX_SIZE: "500MB"
+  VIDEO_OUTPUT_FORMATS: "mp4,webm"
+  VIDEO_QUALITY_PRESETS: "720p,1080p"
+  
+  # AI Service Configuration
+  AI_REQUEST_TIMEOUT: "120000"
+  AI_MAX_TOKENS: "4000"
+  AI_TEMPERATURE: "0.7"
+  
+  # Monitoring Configuration
+  METRICS_ENABLED: "true"
+  TRACING_ENABLED: "true"
+  HEALTH_CHECK_INTERVAL: "30"
+  
+  # Security Configuration
+  CORS_ORIGINS: "https://animagenius.com,https://www.animagenius.com"
+  JWT_EXPIRY: "24h"
+  SESSION_DURATION: "7d"
+  
+  # Feature Flags
+  FEATURE_VIDEO_UPLOAD: "true"
+  FEATURE_BULK_PROCESSING: "true"
+  FEATURE_REALTIME_PREVIEW: "true"
+  FEATURE_ADVANCED_EDITING: "true"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: nginx
+data:
+  nginx.conf: |
+    user nginx;
+    worker_processes auto;
+    error_log /var/log/nginx/error.log warn;
+    pid /var/run/nginx.pid;
+    
+    events {
+        worker_connections 1024;
+        use epoll;
+        multi_accept on;
+    }
+    
+    http {
+        include /etc/nginx/mime.types;
+        default_type application/octet-stream;
+        
+        # Logging
+        log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                       '$status $body_bytes_sent "$http_referer" '
+                       '"$http_user_agent" "$http_x_forwarded_for"';
+        access_log /var/log/nginx/access.log main;
+        
+        # Basic Settings
+        sendfile on;
+        tcp_nopush on;
+        tcp_nodelay on;
+        keepalive_timeout 65;
+        types_hash_max_size 2048;
+        client_max_body_size 500m;
+        
+        # Gzip Settings
+        gzip on;
+        gzip_vary on;
+        gzip_min_length 1024;
+        gzip_comp_level 6;
+        gzip_types text/plain text/css application/json application/javascript text/xml application/xml application/xml+rss text/javascript;
+        
+        # Rate Limiting
+        limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+        limit_req_zone $binary_remote_addr zone=upload:10m rate=1r/s;
+        
+        # Upstream definitions
+        upstream api {
+            least_conn;
+            server animagenius-api:3000 max_fails=3 fail_timeout=30s;
+        }
+        
+        upstream worker {
+            least_conn;
+            server animagenius-worker:3001 max_fails=3 fail_timeout=30s;
+        }
+        
+        server {
+            listen 80;
+            server_name _;
+            
+            # Health check endpoint
+            location /health {
+                access_log off;
+                return 200 "healthy\n";
+                add_header Content-Type text/plain;
+            }
+            
+            # API routes
+            location /api/ {
+                limit_req zone=api burst=20 nodelay;
+                proxy_pass http://api;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection 'upgrade';
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_cache_bypass $http_upgrade;
+                proxy_read_timeout 300s;
+                proxy_connect_timeout 30s;
+            }
+            
+            # Upload routes
+            location /upload/ {
+                limit_req zone=upload burst=5 nodelay;
+                proxy_pass http://api;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+                proxy_request_buffering off;
+                proxy_read_timeout 600s;
+                proxy_connect_timeout 30s;
+            }
+            
+            # Worker routes
+            location /worker/ {
+                proxy_pass http://worker;
+                proxy_http_version 1.1;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+            
+            # Static files
+            location /static/ {
+                expires 1y;
+                add_header Cache-Control "public, immutable";
+                add_header X-Content-Type-Options nosniff;
+            }
+        }
+    }
