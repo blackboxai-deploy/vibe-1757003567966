@@ -1,0 +1,395 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: animagenius-api-netpol
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: api
+spec:
+  podSelector:
+    matchLabels:
+      app: animagenius
+      component: api
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: aws-load-balancer-controller
+    ports:
+    - protocol: TCP
+      port: 3000
+  # Allow ingress from worker pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: animagenius
+          component: worker
+    - podSelector:
+        matchLabels:
+          app: animagenius
+          component: gpu-worker
+    ports:
+    - protocol: TCP
+      port: 3000
+  # Allow ingress from monitoring
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: animagenius-monitoring
+    ports:
+    - protocol: TCP
+      port: 9090
+  egress:
+  # Allow egress to DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow egress to database
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow egress to Redis
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow egress to HTTPS (for external APIs)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow egress to HTTP (for health checks)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 80
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: animagenius-worker-netpol
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: worker
+spec:
+  podSelector:
+    matchLabels:
+      app: animagenius
+      component: worker
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from API pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: animagenius
+          component: api
+    ports:
+    - protocol: TCP
+      port: 3001
+  # Allow ingress from monitoring
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: animagenius-monitoring
+    ports:
+    - protocol: TCP
+      port: 9091
+  egress:
+  # Allow egress to DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow egress to database
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow egress to Redis
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow egress to HTTPS (for external AI APIs)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow egress to S3 (via HTTPS)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: animagenius-gpu-worker-netpol
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: gpu-worker
+spec:
+  podSelector:
+    matchLabels:
+      app: animagenius
+      component: gpu-worker
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from API pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: animagenius
+          component: api
+    ports:
+    - protocol: TCP
+      port: 3002
+  # Allow ingress from ingress controller for direct GPU requests
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: TCP
+      port: 3002
+  # Allow ingress from monitoring
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: animagenius-monitoring
+    ports:
+    - protocol: TCP
+      port: 9092
+  egress:
+  # Allow egress to DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow egress to database
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow egress to Redis
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow egress to HTTPS (for external AI APIs)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow egress to S3 (via HTTPS)
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+
+---
+# Database network policy (if database is in cluster)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: animagenius-database-netpol
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: database
+spec:
+  podSelector:
+    matchLabels:
+      app: animagenius
+      component: database
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow ingress from API pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: animagenius
+          component: api
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow ingress from worker pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: animagenius
+          component: worker
+    - podSelector:
+        matchLabels:
+          app: animagenius
+          component: gpu-worker
+    ports:
+    - protocol: TCP
+      port: 5432
+  # Allow ingress from monitoring (for database metrics)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: animagenius-monitoring
+    ports:
+    - protocol: TCP
+      port: 5432
+
+---
+# Redis network policy (if Redis is in cluster)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: animagenius-redis-netpol
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: redis
+spec:
+  podSelector:
+    matchLabels:
+      app: animagenius
+      component: redis
+  policyTypes:
+  - Ingress
+  ingress:
+  # Allow ingress from API pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: animagenius
+          component: api
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow ingress from worker pods
+  - from:
+    - podSelector:
+        matchLabels:
+          app: animagenius
+          component: worker
+    - podSelector:
+        matchLabels:
+          app: animagenius
+          component: gpu-worker
+    ports:
+    - protocol: TCP
+      port: 6379
+  # Allow ingress from monitoring (for Redis metrics)
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: animagenius-monitoring
+    ports:
+    - protocol: TCP
+      port: 6379
+
+---
+# Monitoring namespace network policy
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monitoring-netpol
+  namespace: animagenius-monitoring
+  labels:
+    app: monitoring
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow ingress from ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: TCP
+      port: 3000  # Grafana
+    - protocol: TCP
+      port: 9090  # Prometheus
+  # Allow ingress between monitoring components
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: animagenius-monitoring
+  egress:
+  # Allow egress to DNS
+  - to: []
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow egress to scrape metrics from production namespace
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: animagenius-production
+  # Allow egress to Kubernetes API
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+  # Allow egress to external alerting services
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 587  # SMTP
+    - protocol: TCP
+      port: 25   # SMTP
+
+---
+# Default deny-all policy for production namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: animagenius-production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+
+---
+# Allow kube-system traffic (for core services)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-kube-system
+  namespace: animagenius-production
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
