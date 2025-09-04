@@ -1,0 +1,325 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      deploy_type:
+        description: 'Deployment type'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+        - all
+        - infrastructure
+        - images
+        - kubernetes
+        - monitoring
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER_NAME: animagenius-production
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
+
+jobs:
+  pre-flight-checks:
+    runs-on: ubuntu-latest
+    outputs:
+      should-deploy-infrastructure: ${{ steps.check.outputs.deploy-infrastructure }}
+      should-deploy-images: ${{ steps.check.outputs.deploy-images }}
+      should-deploy-kubernetes: ${{ steps.check.outputs.deploy-kubernetes }}
+      should-deploy-monitoring: ${{ steps.check.outputs.deploy-monitoring }}
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+
+    - name: Determine deployment scope
+      id: check
+      run: |
+        DEPLOY_TYPE="${{ github.event.inputs.deploy_type || 'all' }}"
+        
+        case "$DEPLOY_TYPE" in
+          "all")
+            echo "deploy-infrastructure=true" >> $GITHUB_OUTPUT
+            echo "deploy-images=true" >> $GITHUB_OUTPUT
+            echo "deploy-kubernetes=true" >> $GITHUB_OUTPUT
+            echo "deploy-monitoring=true" >> $GITHUB_OUTPUT
+            ;;
+          "infrastructure")
+            echo "deploy-infrastructure=true" >> $GITHUB_OUTPUT
+            echo "deploy-images=false" >> $GITHUB_OUTPUT
+            echo "deploy-kubernetes=false" >> $GITHUB_OUTPUT
+            echo "deploy-monitoring=false" >> $GITHUB_OUTPUT
+            ;;
+          "images")
+            echo "deploy-infrastructure=false" >> $GITHUB_OUTPUT
+            echo "deploy-images=true" >> $GITHUB_OUTPUT
+            echo "deploy-kubernetes=false" >> $GITHUB_OUTPUT
+            echo "deploy-monitoring=false" >> $GITHUB_OUTPUT
+            ;;
+          "kubernetes")
+            echo "deploy-infrastructure=false" >> $GITHUB_OUTPUT
+            echo "deploy-images=false" >> $GITHUB_OUTPUT
+            echo "deploy-kubernetes=true" >> $GITHUB_OUTPUT
+            echo "deploy-monitoring=false" >> $GITHUB_OUTPUT
+            ;;
+          "monitoring")
+            echo "deploy-infrastructure=false" >> $GITHUB_OUTPUT
+            echo "deploy-images=false" >> $GITHUB_OUTPUT
+            echo "deploy-kubernetes=false" >> $GITHUB_OUTPUT
+            echo "deploy-monitoring=true" >> $GITHUB_OUTPUT
+            ;;
+        esac
+
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: Upload Trivy scan results to GitHub Security tab
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+    - name: Run Terraform security scan
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'config'
+        scan-ref: 'terraform/'
+        format: 'table'
+
+  deploy-infrastructure:
+    runs-on: ubuntu-latest
+    needs: [pre-flight-checks, security-scan]
+    if: needs.pre-flight-checks.outputs.should-deploy-infrastructure == 'true'
+    environment: production
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.5.7
+
+    - name: Terraform Init
+      run: |
+        cd terraform
+        terraform init
+
+    - name: Terraform Plan
+      run: |
+        cd terraform
+        terraform plan -out=tfplan -var="domain_name=${{ secrets.DOMAIN_NAME }}" \
+          -var="db_password=${{ secrets.DB_PASSWORD }}" \
+          -var="openai_api_key=${{ secrets.OPENAI_API_KEY }}" \
+          -var="anthropic_api_key=${{ secrets.ANTHROPIC_API_KEY }}" \
+          -var="synthesia_api_key=${{ secrets.SYNTHESIA_API_KEY }}" \
+          -var="heygen_api_key=${{ secrets.HEYGEN_API_KEY }}"
+
+    - name: Terraform Apply
+      run: |
+        cd terraform
+        terraform apply tfplan
+
+  build-and-push-images:
+    runs-on: ubuntu-latest
+    needs: [pre-flight-checks, security-scan]
+    if: needs.pre-flight-checks.outputs.should-deploy-images == 'true'
+    strategy:
+      matrix:
+        component: [api, worker, gpu-worker]
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: docker/${{ matrix.component }}/Dockerfile
+        push: true
+        tags: |
+          ${{ env.ECR_REGISTRY }}/animagenius-${{ matrix.component }}:${{ github.sha }}
+          ${{ env.ECR_REGISTRY }}/animagenius-${{ matrix.component }}:latest
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        platforms: linux/amd64
+
+    - name: Run Trivy vulnerability scanner on image
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: ${{ env.ECR_REGISTRY }}/animagenius-${{ matrix.component }}:${{ github.sha }}
+        format: 'table'
+
+  deploy-kubernetes:
+    runs-on: ubuntu-latest
+    needs: [pre-flight-checks, deploy-infrastructure, build-and-push-images]
+    if: always() && needs.pre-flight-checks.outputs.should-deploy-kubernetes == 'true' && (needs.deploy-infrastructure.result == 'success' || needs.deploy-infrastructure.result == 'skipped') && (needs.build-and-push-images.result == 'success' || needs.build-and-push-images.result == 'skipped')
+    environment: production
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
+
+    - name: Deploy to Kubernetes
+      run: |
+        # Create namespaces
+        kubectl apply -f kubernetes/namespaces/
+        
+        # Update image tags in deployment files
+        sed -i "s|image: animagenius/.*:.*|image: ${{ env.ECR_REGISTRY }}/animagenius-api:${{ github.sha }}|g" kubernetes/deployments/api-deployment.yaml
+        sed -i "s|image: animagenius/.*:.*|image: ${{ env.ECR_REGISTRY }}/animagenius-worker:${{ github.sha }}|g" kubernetes/deployments/worker-deployment.yaml
+        sed -i "s|image: animagenius/.*:.*|image: ${{ env.ECR_REGISTRY }}/animagenius-gpu-worker:${{ github.sha }}|g" kubernetes/deployments/worker-deployment.yaml
+        
+        # Deploy ConfigMaps
+        kubectl apply -f kubernetes/configmaps/
+        
+        # Deploy Services
+        kubectl apply -f kubernetes/services/
+        
+        # Deploy Deployments
+        kubectl apply -f kubernetes/deployments/
+        
+        # Deploy Ingress
+        kubectl apply -f kubernetes/ingress/
+        
+        # Deploy Security policies
+        kubectl apply -f security/rbac/
+        kubectl apply -f security/network-policies/
+
+    - name: Wait for deployment
+      run: |
+        kubectl wait --for=condition=available --timeout=600s deployment/animagenius-api -n animagenius-production
+        kubectl wait --for=condition=available --timeout=600s deployment/animagenius-worker -n animagenius-production
+        kubectl wait --for=condition=available --timeout=600s deployment/animagenius-gpu-worker -n animagenius-production
+
+    - name: Run database migrations
+      run: |
+        kubectl create job --from=deployment/animagenius-api migration-job-$(date +%s) -n animagenius-production
+        # Wait for migration job to complete
+        sleep 30
+
+  deploy-monitoring:
+    runs-on: ubuntu-latest
+    needs: [pre-flight-checks, deploy-kubernetes]
+    if: always() && needs.pre-flight-checks.outputs.should-deploy-monitoring == 'true' && (needs.deploy-kubernetes.result == 'success' || needs.deploy-kubernetes.result == 'skipped')
+    environment: production
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
+
+    - name: Deploy monitoring stack
+      run: |
+        kubectl apply -f monitoring/prometheus/
+        kubectl apply -f monitoring/grafana/
+
+    - name: Wait for monitoring deployment
+      run: |
+        kubectl wait --for=condition=available --timeout=300s deployment/prometheus -n animagenius-monitoring
+        kubectl wait --for=condition=available --timeout=300s deployment/grafana -n animagenius-monitoring
+
+  post-deployment-tests:
+    runs-on: ubuntu-latest
+    needs: [deploy-kubernetes, deploy-monitoring]
+    if: always() && (needs.deploy-kubernetes.result == 'success' || needs.deploy-monitoring.result == 'success')
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
+
+    - name: Health check
+      run: |
+        # Wait for ingress to be ready
+        sleep 60
+        
+        # Get ingress URL
+        INGRESS_URL=$(kubectl get ingress animagenius-ingress -n animagenius-production -o jsonpath='{.spec.rules[0].host}')
+        
+        # Health check
+        curl -f "https://$INGRESS_URL/health" || exit 1
+        
+        # API test
+        curl -f "https://$INGRESS_URL/api/v1/health" || exit 1
+
+  notify:
+    runs-on: ubuntu-latest
+    needs: [deploy-infrastructure, build-and-push-images, deploy-kubernetes, deploy-monitoring, post-deployment-tests]
+    if: always()
+    steps:
+    - name: Notify deployment status
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
