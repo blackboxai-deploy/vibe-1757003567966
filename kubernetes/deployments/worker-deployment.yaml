@@ -1,0 +1,342 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: animagenius-worker
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: worker
+    version: v1
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: animagenius
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: animagenius
+        component: worker
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3001"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: animagenius-worker
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+      - name: worker
+        image: animagenius/worker:latest
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 3001
+          protocol: TCP
+        - name: metrics
+          containerPort: 9091
+          protocol: TCP
+        env:
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: animagenius-config
+              key: NODE_ENV
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: animagenius-config
+              key: LOG_LEVEL
+        - name: WORKER_CONCURRENCY
+          valueFrom:
+            configMapKeyRef:
+              name: animagenius-config
+              key: WORKER_CONCURRENCY
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: animagenius-config
+              key: DB_HOST
+        - name: DB_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: animagenius-secrets
+              key: DB_USERNAME
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: animagenius-secrets
+              key: DB_PASSWORD
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: animagenius-config
+              key: REDIS_HOST
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: animagenius-secrets
+              key: REDIS_PASSWORD
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: animagenius-secrets
+              key: OPENAI_API_KEY
+        - name: ANTHROPIC_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: animagenius-secrets
+              key: ANTHROPIC_API_KEY
+        - name: SYNTHESIA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: animagenius-secrets
+              key: SYNTHESIA_API_KEY
+        - name: HEYGEN_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: animagenius-secrets
+              key: HEYGEN_API_KEY
+        - name: AWS_REGION
+          valueFrom:
+            configMapKeyRef:
+              name: animagenius-config
+              key: AWS_REGION
+        - name: S3_BUCKET_VIDEOS
+          valueFrom:
+            configMapKeyRef:
+              name: animagenius-config
+              key: S3_BUCKET_VIDEOS
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 10
+          successThreshold: 1
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 5
+          successThreshold: 1
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+              - ALL
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: worker-cache
+          mountPath: /app/cache
+        - name: processing-temp
+          mountPath: /app/temp
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: worker-cache
+        emptyDir:
+          sizeLimit: 5Gi
+      - name: processing-temp
+        emptyDir:
+          sizeLimit: 10Gi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: component
+                  operator: In
+                  values:
+                  - worker
+              topologyKey: kubernetes.io/hostname
+      tolerations:
+      - key: "compute-optimized"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: animagenius-gpu-worker
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: gpu-worker
+    version: v1
+spec:
+  replicas: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: animagenius
+      component: gpu-worker
+  template:
+    metadata:
+      labels:
+        app: animagenius
+        component: gpu-worker
+        version: v1
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "3002"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: animagenius-gpu-worker
+      securityContext:
+        runAsNonRoot: false  # GPU workers may need privileged access
+      containers:
+      - name: gpu-worker
+        image: animagenius/gpu-worker:latest
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 3002
+          protocol: TCP
+        env:
+        - name: NODE_ENV
+          valueFrom:
+            configMapKeyRef:
+              name: animagenius-config
+              key: NODE_ENV
+        - name: WORKER_TYPE
+          value: "gpu"
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0"
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: animagenius-config
+              key: DB_HOST
+        - name: REDIS_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: animagenius-config
+              key: REDIS_HOST
+        - name: OPENAI_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: animagenius-secrets
+              key: OPENAI_API_KEY
+        - name: SYNTHESIA_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: animagenius-secrets
+              key: SYNTHESIA_API_KEY
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 10
+          failureThreshold: 3
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "1000m"
+            nvidia.com/gpu: 1
+          limits:
+            memory: "8Gi"
+            cpu: "2000m"
+            nvidia.com/gpu: 1
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+        - name: gpu-cache
+          mountPath: /app/cache
+        - name: model-cache
+          mountPath: /app/models
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      - name: gpu-cache
+        emptyDir:
+          sizeLimit: 20Gi
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: gpu-model-cache
+      nodeSelector:
+        accelerator: nvidia-tesla-k80
+      tolerations:
+      - key: "nvidia.com/gpu"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: animagenius-worker
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: worker
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT-ID:role/AnimaGenius-Worker-Role
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: animagenius-gpu-worker
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: gpu-worker
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT-ID:role/AnimaGenius-GPU-Worker-Role
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: gpu-model-cache
+  namespace: animagenius-production
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: gp3
