@@ -1,0 +1,310 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: animagenius-api-sa
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: api
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT-ID:role/AnimaGenius-API-ServiceAccount-Role
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: animagenius-worker-sa
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: worker
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT-ID:role/AnimaGenius-Worker-ServiceAccount-Role
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: animagenius-gpu-worker-sa
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: gpu-worker
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT-ID:role/AnimaGenius-GPU-Worker-ServiceAccount-Role
+
+---
+# API Role - Read access to ConfigMaps and Secrets
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: animagenius-production
+  name: animagenius-api-role
+  labels:
+    app: animagenius
+    component: api
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["services"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: animagenius-api-rolebinding
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: api
+subjects:
+- kind: ServiceAccount
+  name: animagenius-api-sa
+  namespace: animagenius-production
+roleRef:
+  kind: Role
+  name: animagenius-api-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Worker Role - Read access to ConfigMaps and Secrets, plus job management
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: animagenius-production
+  name: animagenius-worker-role
+  labels:
+    app: animagenius
+    component: worker
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "create", "delete"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "create", "delete", "patch"]
+- apiGroups: ["batch"]
+  resources: ["cronjobs"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: animagenius-worker-rolebinding
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: worker
+subjects:
+- kind: ServiceAccount
+  name: animagenius-worker-sa
+  namespace: animagenius-production
+roleRef:
+  kind: Role
+  name: animagenius-worker-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# GPU Worker Role - Similar to worker but with additional GPU resource access
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: animagenius-production
+  name: animagenius-gpu-worker-role
+  labels:
+    app: animagenius
+    component: gpu-worker
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "create", "delete"]
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["get", "list"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["get", "list", "create", "delete", "patch"]
+- apiGroups: ["metrics.k8s.io"]
+  resources: ["nodes", "pods"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: animagenius-gpu-worker-rolebinding
+  namespace: animagenius-production
+  labels:
+    app: animagenius
+    component: gpu-worker
+subjects:
+- kind: ServiceAccount
+  name: animagenius-gpu-worker-sa
+  namespace: animagenius-production
+roleRef:
+  kind: Role
+  name: animagenius-gpu-worker-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# ClusterRole for monitoring components
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: animagenius-monitoring-reader
+  labels:
+    app: animagenius
+    component: monitoring
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  - nodes/proxy
+  - services
+  - endpoints
+  - pods
+  - configmaps
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["extensions", "networking.k8s.io"]
+  resources:
+  - ingresses
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources:
+  - deployments
+  - replicasets
+  - daemonsets
+  - statefulsets
+  verbs: ["get", "list", "watch"]
+- nonResourceURLs: ["/metrics", "/api/v1/metrics"]
+  verbs: ["get"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: animagenius-monitoring-reader
+  labels:
+    app: animagenius
+    component: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: animagenius-monitoring-reader
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: animagenius-monitoring
+- kind: ServiceAccount
+  name: grafana
+  namespace: animagenius-monitoring
+
+---
+# Security Context Constraints for different components
+apiVersion: v1
+kind: SecurityContextConstraints
+metadata:
+  name: animagenius-api-scc
+  labels:
+    app: animagenius
+    component: api
+allowHostDirVolumePlugin: false
+allowHostIPC: false
+allowHostNetwork: false
+allowHostPID: false
+allowHostPorts: false
+allowPrivilegedContainer: false
+allowedCapabilities: null
+allowedUnsafeSysctls: null
+defaultAddCapabilities: null
+forbiddenSysctls:
+- "*"
+fsGroup:
+  type: MustRunAs
+  ranges:
+  - min: 1001
+    max: 1001
+priority: 10
+readOnlyRootFilesystem: true
+requiredDropCapabilities:
+- KILL
+- MKNOD
+- SETUID
+- SETGID
+runAsUser:
+  type: MustRunAs
+  uid: 1001
+seLinuxContext:
+  type: MustRunAs
+supplementalGroups:
+  type: RunAsAny
+users:
+- system:serviceaccount:animagenius-production:animagenius-api-sa
+volumes:
+- configMap
+- downwardAPI
+- emptyDir
+- persistentVolumeClaim
+- projected
+- secret
+
+---
+# Pod Security Policy (if PSPs are enabled)
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: animagenius-psp
+  labels:
+    app: animagenius
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+    - ALL
+  volumes:
+    - 'configMap'
+    - 'emptyDir'
+    - 'projected'
+    - 'secret'
+    - 'downwardAPI'
+    - 'persistentVolumeClaim'
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  seLinux:
+    rule: 'RunAsAny'
+  supplementalGroups:
+    rule: 'MustRunAs'
+    ranges:
+      - min: 1
+        max: 65535
+  fsGroup:
+    rule: 'MustRunAs'
+    ranges:
+      - min: 1
+        max: 65535
+  readOnlyRootFilesystem: true
